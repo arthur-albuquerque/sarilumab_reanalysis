@@ -1,0 +1,552 @@
+---
+title: "Main Models and Diagnostics Plots"
+author: "Arthur M. Albuquerque"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+          code_folding: hide
+          toc: yes
+          toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this document, I will show our main models and their respective diagnostics
+plots. The full explanation about these analyses can be found in our preregistered
+analysis plan: [https://osf.io/kvuqr/](https://osf.io/kvuqr/)
+
+In case you are interested in the R code, you can click in the "Code" → 
+"Show All Code" option in the right upper corner of this document.
+
+```{r}
+pacman::p_load(tidyverse, # Data wrangling
+               brms, # to fit Bayesian models
+               tidybayes, # to wrangle and plot brms data
+               rio, # to import/export files
+               here, # reproducible file paths
+               metafor) # to calculate log OR
+
+# Load function to plot diagnostics
+
+source(here("final_analyses/functions/diag_plot.R"))
+
+set.seed(123)
+```
+
+```{r}
+# Load original data file
+d = import(here("final_analyses", "data", "mortality_data.xlsx"))
+
+# Remove studies that have 0 total events in both treatment arms (3 studies)
+d = 
+  d %>% 
+  filter((control_events + trt_events) != 0)
+
+# Calculate log odds ratio
+
+d_logOR = 
+  escalc(
+  measure = "OR", # log odds ratio,
+  
+  # Tocilizumab/Sarilumab
+  ai = trt_events,
+  n1i = trt_total,
+  
+  # Control
+  ci = control_events,
+  n2i = control_total,
+  
+  data = d
+) %>%
+  as_tibble() %>% 
+  # Dummy approach, tocilizumab = 0, sarilumab = 1
+  mutate(treatment = ifelse(treatment == "tocilizumab", 0, 1)) %>% 
+  # Calculate standard error
+  mutate(sei = sqrt(vi)) 
+```
+
+# Sarilumab only model
+
+### Model
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood}\\
+\theta_i & \sim Normal(\mu_{sarilumab}, \tau^2)\\
+\\
+\mu_{sarilumab} & \sim \operatorname{Normal}(0, 1.5^2) \tag{Priors}\\
+\tau & \sim \operatorname{Half-Normal}(0.5) \\
+\end{align*}
+$$
+
+
+```{r, results="hide"}
+## Formula
+mf = 
+  # https://bookdown.org/content/3890/horoscopes-insights.html#use-the-0-intercept-syntax
+  formula(yi | se(sei) ~ 0 + Intercept + (1 | study))
+
+## Priors
+priors = 
+  prior(normal(0, 1.5), class = "b", coef = "Intercept") + 
+  prior(normal(0, 0.5), class = "sd") # Half-Normal(0.5)
+
+## Fit model (suppressed)
+
+# model_sarilumab_only = 
+#   brm(
+#   data = d_logOR %>% filter(treatment == "1"), # only sarilumab
+#   family = gaussian,
+#   
+#   formula = mf,
+#   prior = priors,
+#   sample_prior = TRUE,
+#   
+#   
+#   backend = "cmdstanr", # faster
+#   cores = parallel::detectCores(),
+#   chains = 4,
+#   warmup = 2000,
+#   iter = 4000,
+#   control = list(adapt_delta = .95),
+#   seed = 123,
+#   
+#   file = here("final_analyses/output/fits/main/model_sarilumab_only")
+# )
+
+# Load model
+model_sarilumab_only = 
+  readRDS(here("final_analyses/output/fits/main/model_sarilumab_only.rds"))
+```
+
+```{r}
+print(model_sarilumab_only)
+```
+
+### Diagnostics plots
+
+```{r, fig.align='center'}
+diag_plot(model = model_sarilumab_only,
+          pars_list = c("b_Intercept", "sd_study__Intercept"),
+          ncol_trace = 4)
+```
+Posterior predictive check
+
+```{r, fig.align='center'}
+pp_check(model_sarilumab_only, nsamples = 50)
+```
+
+# Sarilumab vs. Tocilizumab model
+
+### Model
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood} \\
+\theta_i & \sim Normal(\mu, \tau^2)\\
+\mu &= \beta_0 + \beta_1 x\\
+\\
+\beta_0 & \sim \operatorname{Normal}(0, 1.5^2) \tag{Priors} \\
+\beta_1  & \sim \operatorname{Normal}(0, 1^2) \\
+\tau & \sim \operatorname{Half-Normal}(0.5) \\
+\end{align*}
+$$
+
+```{r, results="hide"}
+
+# Formula
+mf = 
+  formula(yi | se(sei) ~ 0 + Intercept + treatment + (1 | study))
+
+priors = 
+  prior(normal(0, 1.5), class = "b", coef = "Intercept") +
+  prior(normal(0, 1), class = "b", coef = "treatment") +
+  prior(normal(0, 0.5), class = "sd") 
+
+
+# model_sarilumab_vs_tocilizumab =
+#   brm(
+#   data = d_logOR,
+#   family = gaussian,
+#   
+#   formula = mf,
+#   prior = priors,
+#   sample_prior = TRUE,
+#   
+#   
+#   backend = "cmdstanr", # faster
+#   cores = parallel::detectCores(),
+#   chains = 4,
+#   warmup = 2000,
+#   iter = 4000,
+#   control = list(adapt_delta = .95),
+#   seed = 123,
+#   
+#   file = here("final_analyses/output/fits/main/model_sarilumab_vs_tocilizumab")
+# )
+
+model_sarilumab_vs_tocilizumab =
+  readRDS(here("final_analyses/output/fits/main/model_sarilumab_vs_tocilizumab.rds"))
+
+```
+
+```{r}
+print(model_sarilumab_vs_tocilizumab)
+```
+
+### Diagnostics plots
+
+```{r, fig.align='center'}
+diag_plot(model = model_sarilumab_vs_tocilizumab,
+          pars_list = c("b_Intercept", "b_treatment", "sd_study__Intercept"),
+          ncol_trace = 4)
+```
+Posterior predictive check
+
+```{r, fig.align='center'}
+pp_check(model_sarilumab_vs_tocilizumab, nsamples = 50)
+```
+
+# Sarilumab + Tocilizumab as prior model
+
+## Tocilizumab only model
+
+$$
+ \begin{equation*}
+    \sigma_{i[W]}^2 =  \frac{1}{Wa_i+\frac{1}{2}} +
+    \frac{1}{Wb_i+\frac{1}{2}} +
+    \frac{1}{Wc_i+\frac{1}{2}} +
+    \frac{1}{Wd_i+\frac{1}{2}} 
+ \end{equation*}
+$$ 
+
+where $a_i$, $b_i$, $c_i$ and $d_i$ represent the number of events (death and no death) in a tocilizumab study $i$.
+
+```{r}
+W_fun = function(x) {
+  sew = sqrt((1/(W*x$a + 1/2) + 1/(W*x$b + 1/2) + 1/(W*x$c + 1/2) + 1/(W*x$d + 1/2)))
+  sew
+}
+```
+
+```{r}
+# Create data frame with only relevant data
+toci_data = d_logOR %>% 
+  filter(treatment == 0) %>% 
+  mutate(a = trt_events,
+         b = control_events,
+         c = trt_total - trt_events,
+         d = control_total - control_events) %>% 
+  select(study, yi, sei, a:d) %>%
+  as.data.frame()
+
+# Vector of weights, ranging from 0.01 to 1
+
+W = c(0.01, 0.05, seq(from = 0.1, to = 1, by = 0.1))
+
+# Apply W_fun to create a data frame where each new column is the standard error
+# per W
+weight_data = plyr::adply(.data = toci_data, 
+            .margins = 1, 
+            .fun = function(x) W_fun(x)) %>% 
+  
+  # Select revelant columns
+  select(study, yi, V1:last_col()) %>% 
+  # Change new columns names
+  setNames(c(colnames(toci_data)[1:2], paste0("seW_", W)))
+
+```
+
+Now, let's fit several frequentist random-effect meta-analysis (one per weight)
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_{i[W]}, \sigma_{i[W]}^2) \tag{Likelihood}\\
+\theta_{i[W]} & \sim Normal(\mu_{tocilizumab[W]}, \tau_{[W]}^2)\\
+\end{align*}
+$$
+
+```{r}
+
+# Create vector with all standard error column names
+column_names =
+  colnames(weight_data) %>% 
+  data.frame() %>% 
+  rename(weights = ".") %>% 
+  slice(3:n())
+
+# Create empty list to fill below with all fits in the loop
+tocilizumab_freq_models_w = list()
+
+# Create empty data frame to fill with overall mean and sd from each fit per
+# weight
+dat = data.frame(weight = c(0.01, 0.05, seq(from = 0.1, to =  1, by = 0.1)),
+                  mean = NA, sd = NA)
+
+# Run loop to fit all 12 fits and save info in data frame and list
+for (i in 1:nrow(column_names)) {
+  
+  # Pick a column name
+  weight_value = column_names %>% slice(i) %>% pull()
+  
+  # Transform data object into the long format to be able to use filter() below
+  d_w = 
+    weight_data %>% 
+  pivot_longer(seW_0.01:last_col(),
+               names_to = "sei")
+  
+  # Filter only data regarding the weight_value above
+  d_rma = 
+    d_w %>% 
+  filter(sei == weight_value)
+  
+  # Fit meta-analysis
+  fit = rma(yi = yi, sei = value,
+            data = d_rma,
+            method = "REML", slab = study)
+  
+  # Save all fits in this list
+  tocilizumab_freq_models_w[[i]] = fit
+  
+  # Save overall mean ($beta) and sd ($se) per model in this data frame
+  dat[i, "mean"] = tocilizumab_freq_models_w[[i]]$beta
+  dat[i, "sd"] = tocilizumab_freq_models_w[[i]]$se
+  
+}
+
+## Change names of list indexing to facilitate data wrangling later
+names(tocilizumab_freq_models_w) = dat$weight
+
+## Save output
+# saveRDS(tocilizumab_freq_models_w,
+#         here("final_analyses/output/fits/main/frequentist_models_prior_fits.rds"))
+# 
+# saveRDS(dat,
+#         here("final_analyses/output/fits/main/frequentist_models_prior_mean_sd.rds"))
+```
+
+## Sarilumab (likelihood) + Tocilizumab (prior) model
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood}\\
+\theta_i & \sim Normal(\mu_{sarilumab[W]}, \tau^2)\\
+\\
+\mu_{sarilumab{[W]}} & = \mu_{tocilizumab[W]} \tag{Priors} \\
+\tau & \sim \operatorname{Half-Normal}(0.5)
+\end{align*}
+$$
+
+
+```{r, results="hide"}
+
+# Same prior for tau in all models
+tau_prior = prior_string("normal(0, 0.5)", class = "sd")
+
+# Different priors for mu_sarilumab. 1 per W
+# Define priors with string from arguments saved in dat (mean and sd)
+
+# Weight = 0.01
+
+## Create string to input it in prior_string() below
+str_001 = paste0("normal(",
+                 dat[1,2], # Mean
+                 ",",
+                 dat[1,3], # SD
+                 ")")
+
+## Create prior based on string above
+mu_prior_001 = prior_string(str_001, class = "b", coef = "Intercept")
+
+# Weight = 0.05
+str_005 = paste0("normal(",dat[2,2],",",dat[2,3],")")
+mu_prior_005 = prior_string(str_005, class = "b", coef = "Intercept")
+
+# Weight = 0.10
+str_010 = paste0("normal(",dat[3,2],",",dat[3,3],")")
+mu_prior_010 = prior_string(str_010, class = "b", coef = "Intercept")
+
+# Weight = 0.20
+str_020 = paste0("normal(",dat[4,2],",",dat[4,3],")")
+mu_prior_020 = prior_string(str_020, class = "b", coef = "Intercept")
+
+# Weight = 0.30
+str_030 = paste0("normal(",dat[5,2],",",dat[5,3],")")
+mu_prior_030 = prior_string(str_030, class = "b", coef = "Intercept")
+
+# Weight = 0.40
+str_040 = paste0("normal(",dat[6,2],",",dat[6,3],")")
+mu_prior_040 = prior_string(str_040, class = "b", coef = "Intercept")
+
+# Weight = 0.50
+str_050 = paste0("normal(",dat[7,2],",",dat[7,3],")")
+mu_prior_050 = prior_string(str_050, class = "b", coef = "Intercept")
+
+# Weight = 0.60
+str_060 = paste0("normal(",dat[8,2],",",dat[8,3],")")
+mu_prior_060 = prior_string(str_060, class = "b", coef = "Intercept")
+
+# Weight = 0.70
+str_070 = paste0("normal(",dat[9,2],",",dat[9,3],")")
+mu_prior_070 = prior_string(str_070, class = "b", coef = "Intercept")
+
+# Weight = 0.80
+str_080 = paste0("normal(",dat[10,2],",",dat[10,3],")")
+mu_prior_080 = prior_string(str_080, class = "b", coef = "Intercept")
+
+# Weight = 0.90
+str_090 = paste0("normal(",dat[11,2],",",dat[11,3],")")
+mu_prior_090 = prior_string(str_090, class = "b", coef = "Intercept")
+
+# Weight = 1
+str_100 = paste0("normal(",dat[12,2],",",dat[12,3],")")
+mu_prior_100 = prior_string(str_100, class = "b", coef = "Intercept")
+
+# Put all priors together
+priors = list(c(mu_prior_001, tau_prior), # W = 0.01
+              c(mu_prior_005, tau_prior), # W = 0.05
+              c(mu_prior_010, tau_prior), # W = 0.10
+              c(mu_prior_020, tau_prior), # W = 0.20
+              c(mu_prior_030, tau_prior), # W = 0.30
+              c(mu_prior_040, tau_prior), # W = 0.40
+              c(mu_prior_050, tau_prior), # W = 0.50
+              c(mu_prior_060, tau_prior), # W = 0.60
+              c(mu_prior_070, tau_prior), # W = 0.70
+              c(mu_prior_080, tau_prior), # W = 0.80
+              c(mu_prior_090, tau_prior), # W = 0.90
+              c(mu_prior_100, tau_prior)) # W = 1.00
+ 
+# Only data from sarilumab
+sari_data = d_logOR %>% filter(treatment == 1)
+
+# Define formula
+mf = 
+  formula(yi | se(sei) ~ 0 + Intercept + (1 | study))
+
+# Define arguments for brm()
+base_args = list(data = sari_data,
+                 family = gaussian,
+                 formula = mf,
+                 iter = 4000, warmup = 2000, chains = 4,
+                 cores = parallel::detectCores(),
+                 control = list(adapt_delta = .99),
+                 sample_prior = TRUE, seed = 123,
+                 backend = "cmdstanr")
+
+# Create vector with all weights to use later
+vector_weights = data.frame(weight = c(0.01, 0.05, seq(from = 0.1, to =  1, by = 0.1)))
+
+# Create list to store all fits
+models_sarilumab_w = list()
+
+## Run loop
+# for (i in 1:nrow(vector_weights)) {
+#   
+#   # Show what model is running
+#   print(vector_weights[i, c("weight")])
+#   
+#   # Put respective prior together with other arguments 
+#   args = c(list(prior = priors[[i]]), base_args)
+#   
+#   # Fit model using brm()
+#   fit = do.call(brm, args)
+#   
+#   # Store the whole model in a list, where
+#   # [[1]] = 0.01 weight, [[2]] = 0.05, [[3]] = 0.10, [[4]] = 0.20, ...
+#   # [[12]] = 1
+#   models_sarilumab_w[[i]] = fit
+# }
+
+## Change names of list indexing to facilitate data wrangling later
+# names(models_sarilumab_w) = vector_weights$weight
+
+## Save list with all models
+# saveRDS(models_sarilumab_w, 
+#         here("final_analyses/output/fits/main/models_sarilumab_w.rds"))
+
+# Load models
+models_sarilumab_w = readRDS(
+  here("final_analyses/output/fits/main/models_sarilumab_w.rds"))
+
+```
+
+### Priors
+
+```{r, fig.align="center"}
+vector_weights = data.frame(weight = c(0.01, 0.05, seq(from = 0.1, to =  1, by = 0.1)))
+
+for (i in 1:nrow(column_names)) {
+  
+  lab = paste0("W = ", vector_weights %>% slice(i) %>% pull() )
+  
+  forest(tocilizumab_freq_models_w[[i]], transf = exp, xlab = "Odds Ratio")
+  
+  grid::grid.text(lab, .65, .7, gp=grid::gpar(cex=2))
+  
+}
+```
+
+These are the overall estimates from the frequentist models
+
+```{r, fig.align="center"}
+
+dat %>% 
+  ggplot(aes(y = "", dist = distributional::dist_normal(mean, sd),
+             color = sd)) +
+  stat_dist_slab(fill = NA) +
+  coord_cartesian(expand = FALSE) +
+  labs(x = "log odds ratio", y = "Density\n") +
+  theme_minimal()
+```
+
+```{r, fig.align="center"}
+dat %>% 
+  ggplot(aes(y = sd, dist = distributional::dist_normal(mean, sd))) +
+  stat_dist_halfeye(position = "dodge",
+                    .width = .95) +
+  labs(x = "log odds ratio", y = "Standard deviation of each distribution\n") +
+  theme_minimal()
+```
+
+
+### Diagnostics plots
+
+##### Sarilumab + Tocilizumab model
+
+```{r, fig.align='center'}
+# Run loop
+for (i in 1:nrow(vector_weights)) {
+  # Run custom function diag_plot, 1 per weight
+p = diag_plot(model = models_sarilumab_w[[i]],
+          pars_list = c("b_Intercept", "sd_study__Intercept"),
+          ncol_trace = 4)
+# Display plot
+print(p)  
+
+# Add legend to show respective weight
+lab = paste0("W = ", vector_weights %>% slice(i) %>% pull() )
+grid::grid.text(lab, .75, .05, gp=grid::gpar(cex=2))
+}
+```
+
+Posterior predictive check
+
+```{r, fig.align='center'}
+# Run lopp
+for (i in 1:nrow(vector_weights)) {
+p = pp_check(models_sarilumab_w[[i]], nsamples = 50)
+
+print(p)
+
+lab = paste0("W = ", vector_weights %>% slice(i) %>% pull() )
+grid::grid.text(lab, .8, .9, gp=grid::gpar(cex=2))
+}
+```
+
+
+```{r}
+sessionInfo()
+```
+

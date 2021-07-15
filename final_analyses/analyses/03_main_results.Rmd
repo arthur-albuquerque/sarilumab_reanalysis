@@ -1,0 +1,674 @@
+---
+title: "Main Results"
+author: "Arthur M. Albuquerque"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+          code_folding: hide
+          toc: yes
+          toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse, # Data wrangling
+               brms, # to wrangle Bayesian models
+               tidybayes, # to wrangle and plot brms data
+               rio, # to import/export files
+               here, # reproducible file paths
+               patchwork,
+               PNWColors,
+               metafor) # to calculate log OR
+
+set.seed(123)
+```
+
+```{r}
+# Load models
+
+model_sarilumab_only = 
+  readRDS(here("final_analyses/output/fits/main/model_sarilumab_only.rds"))
+
+model_sarilumab_vs_tocilizumab =
+  readRDS(here("final_analyses/output/fits/main/model_sarilumab_vs_tocilizumab.rds"))
+
+models_sarilumab_w = 
+  readRDS(here("final_analyses/output/fits/main/models_sarilumab_w.rds"))
+
+frequentist_models_prior_fits =
+  readRDS(here("final_analyses/output/fits/main/frequentist_models_prior_fits.rds"))
+
+frequentist_models_prior_mean_sd = 
+  readRDS(here("final_analyses/output/fits/main/frequentist_models_prior_mean_sd.rds"))
+```
+
+
+```{r}
+# Load original data file
+d = import(here("final_analyses", "data", "mortality_data.xlsx"))
+
+# Remove studies that have 0 total events in both treatment arms (3 studies)
+d = 
+  d %>% 
+  filter((control_events + trt_events) != 0)
+
+# Calculate log odds ratio
+
+d_logOR = 
+  escalc(
+  measure = "OR", # log odds ratio,
+  
+  # Tocilizumab/Sarilumab
+  ai = trt_events,
+  n1i = trt_total,
+  
+  # Control
+  ci = control_events,
+  n2i = control_total,
+  
+  data = d
+) %>%
+  as_tibble() %>% 
+  # Dummy approach, tocilizumab = 0, sarilumab = 1
+  mutate(treatment = ifelse(treatment == "tocilizumab", 0, 1)) %>% 
+  # Calculate standard error
+  mutate(sei = sqrt(vi)) 
+```
+
+In this document, I present our main analyses. Odds ratio lower than 1 means
+treatment benefit. 
+
+The full explanation about these analyses can be found in our preregistered
+analysis plan: [https://osf.io/kvuqr/](https://osf.io/kvuqr/)
+
+<br>
+
+### What is the effect of sarilumab in reducing mortality?
+
+First, let's estimate the posterior distribution of sarilumab's overall effect
+using weakly informative priors for $\mu_{sarilumab}$ and $\tau$.
+
+<br>
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood}\\
+\theta_i & \sim Normal(\mu_{sarilumab}, \tau^2)\\
+\\
+\mu_{sarilumab} & \sim \operatorname{Normal}(0, 1.5^2) \tag{Priors}\\
+\tau & \sim \operatorname{Half-Normal}(0.5) \\
+\end{align*}
+$$
+
+```{r}
+p1 = 
+  d_logOR %>%
+  filter(treatment == "1") %>% 
+  mutate(ub = yi + 1.96*sei,
+         lb = yi - 1.96*sei,
+         yiOR = exp(yi),
+         lbOR = exp(lb),
+         ubOR = exp(ub),
+         # Reverse order of studies
+         study = fct_rev(study)) %>% 
+  
+  ggplot(aes(x = yiOR, xmin = lbOR, xmax = ubOR, y = study)) +
+  geom_pointinterval() +
+  geom_vline(xintercept = 1, linetype = 2) +
+  scale_x_continuous(breaks = seq(0, 3, 0.5)) +
+  coord_cartesian(x = c(0, 3)) +
+  labs(x = "\nOdds Ratio", y = NULL) +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 16),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+  
+```
+
+```{r, fig.width=10, fig.height=5, fig.cap="Panel A: Interval bars depict the effect size of sarilumab versus control in each study included in WHO's meta-analysis. Two studies present wide 95% confidence intervals and are not shown in full in this figure, which are SARCOVID: [0.12 - 64.9], and SARTRE: [0.18 - 22.9]. Panel B: Posterior distribution of sarilumab's overall effect (mu_sarilumab). Interval bar depict the mean (1.03) and 95% credible interval (0.69 - 1.40). There is 42% of probability of odds ratio being lower than 1, and 14% of odds ratio lower than 0.85."}
+prob_benefit = 
+  model_sarilumab_only %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean(b_Intercept < 0),2))
+
+prob_benefit085 = 
+  model_sarilumab_only %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean(b_Intercept < log(0.85)),2))
+# 14%
+
+ci95 = model_sarilumab_only %>% 
+  posterior_samples() %>% 
+  mean_qi(exp(b_Intercept))
+
+# 1.03 [0.69, 1.40]
+
+p2 = 
+  model_sarilumab_only %>% 
+  posterior_samples() %>% 
+  
+  ggplot(aes(exp(b_Intercept))) +
+  stat_halfeye(aes(fill = stat(x < 1)),
+               .width = .95, show.legend = FALSE,
+               point_interval = mean_qi) +
+  scale_fill_manual(values = c("gray85", "skyblue")) +
+  annotate("text", x = 0.9, y = 0.06, label = paste0(prob_benefit, "%"),
+           colour = "black",  size = 6) +
+  geom_vline(xintercept = 1, linetype = 2) +
+  scale_x_continuous(breaks = seq(0.6, 1.6, 0.2)) +
+  coord_cartesian(x = c(0.5, 1.7)) +
+  labs(x ="\nOdds Ratio", y = NULL) +
+  theme(
+    strip.background = element_rect(fill = "#E4E6E7"),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.title.x = element_text(size = 16),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+p1 + p2 + plot_annotation(tag_levels = "A")
+```
+
+```{r}
+prob_benefit_sari = 
+  model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean((b_Intercept + b_treatment) < 0),2))
+
+prob_benefit_toci = 
+  model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean((b_Intercept) < 0),2))
+
+# https://r-graphics.org/recipe-annotate-facet
+data_text = data.frame(label = c(paste0(prob_benefit_toci, "%"),
+                                 paste0(prob_benefit_sari, "%")), 
+                        name = c("Tocilizumab", "Sarilumab"),
+                        x = c(0.68, 0.68),
+                        y = c(0.5, 0.5))
+
+cis95 = model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(Sarilumab = exp(b_Intercept + b_treatment),
+         Tocilizumab = exp(b_Intercept),
+         ratioOR = exp(b_treatment)) %>% 
+  mean_qi()
+
+# Sari: 1.06 [0.78, 1.37]
+# Toci: 0.84 [0.71, 1.00]	
+
+# ratioOR: 1.27	[0.89, 1.69]
+
+p1 = model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(Sarilumab = exp(b_Intercept + b_treatment),
+         Tocilizumab = exp(b_Intercept)) %>% 
+  pivot_longer(Sarilumab:Tocilizumab) %>% 
+  mutate(name = factor(name, levels = c("Sarilumab", "Tocilizumab"))) %>% 
+  
+  ggplot(aes(value)) +
+  stat_halfeye(aes(fill = stat(x < 1)),
+               .width = .95, show.legend = FALSE,
+               point_interval = mean_qi) +
+  scale_fill_manual(values = c("gray85", "skyblue")) +
+  geom_vline(xintercept = 1, linetype = 2) +
+  scale_x_continuous(breaks = seq(0.6, 1.6, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.1)) +
+  coord_cartesian(x = c(0.5, 1.7)) +
+  labs(x ="\nOdds Ratio", y = NULL) +
+  theme(
+    strip.background = element_rect(fill = "#E4E6E7"),
+    strip.text.x = element_text(size = 12),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.title.x = element_text(size = 14),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 40, 20),
+    panel.border = element_rect(colour = "#999999", fill=NA, size=1)
+  ) +
+    facet_wrap(~name, ncol = 1) +
+  # Annotation
+  geom_text(data = data_text,
+            size = 5,
+            aes(x = x,
+                y = y,
+                label = label))
+```
+
+
+
+
+
+```{r}
+p2 = model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  
+  ggplot(aes(exp(b_treatment))) +
+  geom_vline(xintercept = c(0.25, 0.75, 1.25, 1.75), color = "gray80", size = 0.3) +
+  stat_halfeye(.width = 0.95, point_interval = mean_qi, fill = "#9C3A2C") +
+  geom_vline(xintercept = 1, linetype = 2) +
+  
+  scale_x_continuous(breaks = seq(0, 2, 0.5)) +
+  coord_cartesian(x = c(0, 2)) +
+  labs(x =NULL, y = NULL) +
+  theme(
+    strip.background = element_rect(fill = "#E4E6E7"),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.title.x = element_text(size = 16),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 40, 0)
+  )
+
+```
+
+
+
+
+
+```{r}
+margin = (1/0.77)^0.5
+
+prob_noninferiority = 
+  model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean((b_treatment) < log(margin)),2))
+
+p3 = model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  
+  ggplot(aes(exp(b_treatment))) +
+  stat_slab(aes(fill = stat(x < margin)),show.legend = FALSE) +
+  scale_fill_manual(values = c("gray85", "#DCA3C2")) +
+  geom_vline(xintercept = margin, linetype = 2) + 
+  annotate("text", x = 1, y = 0.06, label = paste0(prob_noninferiority, "%"),
+           colour = "black",  size = 6) +
+  scale_x_continuous(breaks = c(seq(0.6, 2, 0.4), margin),
+                     labels = function(x) round(as.numeric(x), 2)) +
+  coord_cartesian(x = c(0.5, 2)) +
+  labs(x =NULL, y = NULL, title = "Noninferiority analysis\n") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    strip.background = element_rect(fill = "#E4E6E7"),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.title.x = element_text(size = 16),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+```
+
+```{r, fig.align="center", fig.height=6, fig.width=8}
+
+prob_equivalence = 
+  model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(
+    mean(b_treatment > log(0.85) & b_treatment < log(1/0.85)),
+    2))
+
+p4 = model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  
+  ggplot(aes(exp(b_treatment))) +
+  stat_slab(aes(fill = stat(x > 0.85 & x < 1/0.85)), show.legend = FALSE) +
+  scale_fill_manual(values = c("gray85", "#83C37C")) +
+  geom_vline(xintercept = c(0.85,1/0.85), linetype = 2) + 
+  annotate("text", x = 1, y = 0.06, label = paste0(prob_equivalence, "%"),
+           colour = "black",  size = 6) +
+  scale_x_continuous(breaks = c(seq(0.6, 2, 0.4), 0.85, 1/0.85),
+                     labels = function(x) round(as.numeric(x), 2)) +
+  coord_cartesian(x = c(0.5, 2)) +
+  labs(x =NULL, y = NULL, title = "Equivalence analysis\n") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    strip.background = element_rect(fill = "#E4E6E7"),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.title.x = element_text(size = 16),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+
+```
+
+```{r}
+arrow_labels = c("Sarilumab Better", "Tocilizumab Better")
+
+xlim = c(0, 20)
+
+xlab_df = data.frame(text = arrow_labels,
+                          x = c(1.9,19),
+                          y = c(0, 0),
+                          hjust = c(0, 1))
+
+a_small_amount = abs(xlim[1] - xlim[2])/35
+
+null_line_at = 10
+
+arrow_df = data.frame(id = c(1,2),
+                      xstart = c(null_line_at - a_small_amount,
+                                      null_line_at + a_small_amount),
+                      xend = c(xlim[1] + a_small_amount, xlim[2] - a_small_amount),
+                      y = c(1, 1))
+
+arrows_plot = ggplot() +
+      geom_segment(data = arrow_df,
+                   aes(x = .data$xstart,
+                       xend = .data$xend,
+                       y = .data$y,
+                       yend = .data$y),
+                   arrow = arrow(angle = 15, type = "closed", length = grid::unit(0.1, "in"))) +
+  geom_text(data = xlab_df,
+            aes(x = .data$x,
+                y = .data$y,
+                label = .data$text,
+                hjust = .data$hjust), size = 4) +
+  scale_y_continuous(expand = c(0,0), limits = c(-0.5, 1.75)) +
+  scale_x_continuous(expand = c(0,0), limits = xlim) +
+  theme(panel.background = element_rect(fill = "transparent"),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.background = element_rect(fill = "transparent"),
+        legend.box.background = element_rect(fill = "transparent"),
+        panel.border = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x = element_blank())
+```
+
+### Is sarilumab noninferior/equivalent to tocilizumab?
+
+Next, let's estimate the posterior probability of noninferiority and equivalence between sarilumab and tocilizumab. To this end, we fitted a model incorporing data from both drugs.
+Then, we estimated the posterior distribution of sarilumab and tocilizumab (odds ratio scale). Finally, we compared both posterior distributions by calculating the ratio of odds ratios (sarilumab vs. tocilizumab).
+
+Of note, the estimate posterior distribution of sarilumab's effect is slightly different from the one showed above in Figure 1. A possible explanation for this phenomenon is that now we are fitting one model including both drugs, which yields a more precise posterior distribution for $\tau$. Because of this, the estimated variance around sarilumab's 
+posterior distribution is smaller, which explains the slightly narrower 95% credible interval ([0.78, 1.37] vs. [0.69 - 1.40]) and lower posterior probability of any benefit (36% vs. 42%).
+
+<br><br>
+
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood}\\
+\theta_i & \sim Normal(\mu, \tau^2)\\
+\mu &= \beta_0 + \beta_1 x\\
+\\
+\beta_0 & \sim \operatorname{Normal}(0, 1.5^2) \tag{Priors} \\
+\beta_1  & \sim \operatorname{Normal}(0, 1^2) \\
+\tau & \sim \operatorname{Half-Normal}(0.5) \\
+\end{align*}
+
+<br><br>
+
+\begin{align*}
+exp(\beta_1) =
+\frac {OR_{sarilumab}}{OR_{tocilizumab}} 
+\end{align*}
+
+```{r, fig.align="center", fig.height=8, fig.width=8, fig.cap = "Panel A: On the left, estimated posterior distributions for sarilumab's (1.06 [95% Crl 0.78, 1.37]) and tocilizumab's (0.84 [95% Crl 0.71, 1.00]) overall effect are shown. For sarilumab, there is 36% of probability of odds ratio being lower than 1, while 97% for tocilizumab. On the right, the posterior distribution of ratio of odds ratio is shown (1.27	[95% Crl 0.89, 1.69]. Panels B and C: Ratio of odds ratio is shown. While the posterior probability below the noninferiority margin (1.14) is 26%, the posterior probability within our predetermined range of practical equivalence (ROPE), i.e. between 0.85 and 1/0.85, is 31%"}
+
+# Sari: 1.06 [0.78, 1.37]
+# Toci: 0.84 [0.71, 1.00]	
+
+# ratioOR: 1.27	[0.89, 1.69]
+
+p2m = (p2 + inset_element(arrows_plot,
+                                ignore_tag = TRUE,
+                                align_to = "full",
+                                left = unit(0, 'cm'),
+                                bottom = unit(0.5, 'cm'),
+                                right = unit(8.8, 'cm'),
+                                top = unit(2.3, 'cm')))
+
+ (p1 + p2m) / (p3 + p4)  +
+  
+  plot_annotation(tag_levels = "A")
+```
+
+<br><br>
+
+### What is the effect of sarilumab using informative priors based on tocilizumab?
+
+Lastly, let's estimate the posterior distribution of sarilumab's effect using informative priors for $\mu_{sarilumab}$ based on tocilizumab. First, we recalculated the 
+standard errors for each tocilizumab study using the following formula:
+
+\begin{equation*}
+    \sigma_{i[W]}^2 =  \frac{1}{Wa_i+\frac{1}{2}} +
+    \frac{1}{Wb_i+\frac{1}{2}} +
+    \frac{1}{Wc_i+\frac{1}{2}} +
+    \frac{1}{Wd_i+\frac{1}{2}} 
+ \end{equation*}
+ 
+where $W$ is the weight, ranging from $0.01$ to $1$. We then performed separate
+frequentist random-effect meta-analyses for each set of tocilizumab studies and $W$ to estimate an overall effect for tocilizumab ($\mu_{tocilizumab[W]}$), as further described in the another report in my [GitHub](https://github.com/arthur-albuquerque/sarilumab_reanalysis/tree/master/final_analyses) and in the [analysis plan](https://osf.io/kvuqr/). Here are the tocilizumab's overall effects for different $W$: 
+
+```{r, fig.align = "center", fig.cap = "Prior distributions based on tocilizumab's studies at different weights. Interval bars depict the mean and 95% confidence interval."}
+frequentist_models_prior_mean_sd %>% 
+  mutate(ub = mean + 1.96*sd,
+         lb = mean - 1.96*sd,
+         yiOR = exp(mean),
+         lbOR = exp(lb),
+         ubOR = exp(ub)) %>% 
+  select(weight, yiOR, lbOR, ubOR) %>% 
+  
+  ggplot() +
+  geom_hline(yintercept = 1, linetype = 2) +
+  geom_pointinterval(aes(y = yiOR, ymin = lbOR, ymax = ubOR, x = 100*weight)) +
+  scale_color_manual( values = c("firebrick", "black")) +
+  scale_x_continuous(breaks = c(1, 5, seq(10, 100, 10))) +
+  labs(x = "\nWeight on Tocilizumab (%)", y = "Odds Ratio\n") +
+  theme(legend.position = "none",
+        axis.ticks.x = element_blank(),
+        plot.margin = margin(20, 30, 20, 20),
+        axis.text.x = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+        panel.background = element_blank(),
+        panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+        panel.grid.major.y = element_line(color = "gray80", size = 0.3))
+```
+
+<br><br>
+
+Next, we performed Bayesian random-effect meta-analyses on sarilumab using the estimates depicted above as prior distributions. 
+
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \\
+\theta_i & \sim Normal(\mu_{sarilumab[W]}, \tau^2)\\
+\end{align*}
+
+\noindent Here are the prior distributions, where $M_{[W]}  = mean(\mu_{tocilizumab[W]})$,
+and $M_{[W]}  = Standard Error(\mu_{tocilizumab[W]})$:
+
+\begin{align*}
+\mu_{sarilumab{[W]}} & \sim \operatorname{Normal}(M_{[W]}, S_{[W]}) \\
+\tau & \sim \operatorname{Half-Normal}(0.5)
+\end{align*}
+
+These are our results:
+
+```{r}
+# Create data.frame to fill with mean, Standard Error, 95% Crl lower and upper bound below
+posteriors_sari_with_toci = 
+  data.frame(weight = c(0.01, 0.05, seq(from = 0.1, to =  1, by = 0.1)),
+                  mean = NA, lb = NA, ub = NA)
+
+
+for (i in 1:nrow(posteriors_sari_with_toci)) {
+  
+  posteriors_sari_with_toci[i, c("mean", "lb", "ub")] = 
+    
+    # models_sarilumab_w contains all twelve models (1 per weight)
+    # [[1]] = weight of 0.01, [[2]] = w of 0.05, and so on
+    (models_sarilumab_w[[i]] %>%
+       # Select posterior distribution of mu_sarilumab
+       fixef() %>%
+       # Exponentiate to transform into the odds ratio scale
+       # and extract mean, Standard Error 95% Crl lower and upper bound
+       exp())[1,(c("Estimate", "Q2.5", "Q97.5"))] 
+}
+  
+```
+
+```{r}
+toci_prior = frequentist_models_prior_mean_sd %>% 
+  mutate(ub = mean + 1.96*sd,
+         lb = mean - 1.96*sd,
+         yiOR = exp(mean),
+         lbOR = exp(lb),
+         ubOR = exp(ub)) 
+
+
+sari = sari_overall_weakly = 
+  model_sarilumab_only %>% 
+  fixef() %>% 
+  as_tibble() %>% 
+  summarise(weight = -10,
+            mean = exp(Estimate),
+            lb = exp(Q2.5),
+            ub = exp(Q97.5))
+
+p1 = posteriors_sari_with_toci %>% 
+  
+  ggplot(aes(x = 100*weight)) + # transform to percentage
+  geom_hline(yintercept = 1, linetype = 1, color = "gray80", size = 1) +
+  
+  geom_line(data = toci_prior, aes(y = lbOR), linetype = 2) +
+  geom_line(data = toci_prior, aes(y = ubOR), linetype = 2) +
+  geom_pointinterval(data = sari,
+                     aes(y = mean, ymin = lb, ymax = ub, x = weight),
+                         color = "firebrick",
+                     interval_size = 4) +
+  geom_ribbon(aes(ymin = lb, ymax = ub), alpha = 0.5, fill = "#A263A9") +
+  
+  geom_line(aes(y = mean), size = 1) +
+  scale_x_continuous(breaks = c(1, seq(20, 100, 20))) +
+  scale_y_continuous(breaks = seq(0.25, 1.75, 0.25)) +
+  labs(x = "\nWeight on Tocilizumab (%)",
+       y = "Odds Ratio\n") + 
+  
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.y = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+
+```
+
+```{r}
+# Create data.frame to fill with mean, Standard Error, 95% Crl lower and upper bound below
+probabilities_sari_with_toci = 
+  data.frame(weight = c(0.01, 0.05, seq(from = 0.1, to =  1, by = 0.1)),
+                  p1 = NA, p90 = NA, p85 = NA, p80 = NA, p75 = NA)
+
+
+for (i in 1:nrow(probabilities_sari_with_toci)) {
+  
+  probabilities_sari_with_toci[i, c("p1", "p90", "p85", "p80", "p75")] =
+    
+    # models_sarilumab_w contains all twelve models (1 per weight)
+    # [[1]] = weight of 0.01, [[2]] = w of 0.05, and so on
+    (models_sarilumab_w[[i]] %>%
+        posterior_samples() %>% 
+        summarise(p1  = 100*mean(exp(b_Intercept) < 1),
+                  p90 = 100*mean(exp(b_Intercept) < 0.95),
+                  p85 = 100*mean(exp(b_Intercept) < 0.85),
+                  p80 = 100*mean(exp(b_Intercept) < 0.80),
+                  p75 = 100*mean(exp(b_Intercept) < 0.75)
+                  ))[1,(c("p1", "p90", "p85", "p80", "p75"))] 
+       
+}
+  
+```
+
+```{r, fig.align='center', fig.width=10, fig.height=5, fig.cap= "Panel A: Red interval bar depict the mean and 95% credible interval (Crl) of sarilumab's overall effect using weakly informative priors (Figure 1). Black dashed lines represent prior distributions for overall effect based on tocilizumab's data at different weights. Purple dashed areas represent the posterior distribution 95% Crls of sarilumab's overall effect when using tocilizumab's data as the prior distribution at different weights. Black solid line depict the mean of these posterior distributions. Panel B: Based on posterior distributions of sarilumab's effect using tocilizumab as prior, each line represents the posterior probability of benefit for a specific cutoff, such as odds ratio lower than 1, 0.9, 0.85 and 0.80. Vertical blacked dashed line depict 31%, which is the estimated posterior probability of equivalence between sarilumab and tocilizumab (Figure 2)."}
+p2 = probabilities_sari_with_toci %>% 
+  pivot_longer(p1:p75) %>% 
+  mutate(
+    name = case_when(
+      
+    name == "p1" ~ "< 1",
+    name == "p90" ~ "< 0.9",
+    name == "p85" ~ "< 0.85",
+    name == "p80" ~ "< 0.80",
+    name == "p75" ~ "< 0.75"),
+    
+    name = factor(name, levels = c("< 1", "< 0.9", "< 0.85", "< 0.80", "< 0.75"))
+    ) %>% 
+  filter(name != "< 0.75") %>% 
+  rename("Odds Ratio" = name) %>% 
+  
+  ggplot(aes(x = 100*weight, y = value, group = `Odds Ratio`, color = `Odds Ratio`)) +
+  geom_segment(aes(x = pull(prob_equivalence), xend = pull(prob_equivalence),
+                   y = 0, yend = 100),
+               size = 0.2, color = "black", linetype = 2) +
+  geom_line(size = 1) +
+  scale_color_manual(values= pnw_palette(name="Bay",n=5)) +
+  scale_x_continuous(breaks = c(1, pull(prob_equivalence), seq(20, 100, 20))) +
+  scale_y_continuous(breaks = seq(0, 100, 20)) +
+  labs(x = "\nWeight on Tocilizumab (%)",
+       y = "Probability of Benefit (%)\n") + 
+  
+  theme(
+    legend.title = element_text(size=14),
+    legend.text = element_text(size=12),
+    legend.key = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    panel.grid.major.y = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+p1 + p2 + plot_annotation(tag_levels = "A")
+```
+
+
+```{r}
+sessionInfo()
+```
+
