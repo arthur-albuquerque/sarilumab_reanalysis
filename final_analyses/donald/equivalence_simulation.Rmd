@@ -1,0 +1,175 @@
+---
+title: "Untitled"
+author: "Arthur"
+date: "7/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+pacman::p_load(brms,
+               tidyverse,
+               metafor,
+               rio, # to import/export files
+               here) # reproducible file paths
+
+
+```
+
+```{r}
+# Import model and original data
+model_sarilumab_vs_tocilizumab =
+  readRDS(here("final_analyses/output/fits/main/model_sarilumab_vs_tocilizumab.rds"))
+
+d = import(here("final_analyses", "data", "mortality_data.xlsx")) %>% 
+  # Exclude studies with 0 events in both treament arms
+  filter((control_events + trt_events) != 0)
+```
+
+```{r}
+# Calculate the average variance for toci studies (log odds ratio scale)
+
+var_fun = function(a,b,c,d){
+  
+  var = 1/(a + 1/2) + 1/(b + 1/2) + 1/(c + 1/2) + 1/(d + 1/2)
+  
+  var
+}
+
+avg_variance_toci = 
+  d %>% 
+  filter(treatment == "tocilizumab") %>% 
+  mutate(a = mean(trt_events),
+         b = mean(control_events),
+         c = mean(trt_total - trt_events),
+         d = mean(control_total - control_events)) %>% 
+  summarise(var = var_fun(a,b,c,d)) %>% 
+  slice(1) %>% 
+  pull()
+```
+
+
+```{r}
+# Calculate sari effect sizes
+sari_logOR = 
+  escalc(
+  measure = "OR", # log odds ratio,
+  
+  # Tocilizumab/Sarilumab
+  ai = trt_events,
+  n1i = trt_total,
+  
+  # Control
+  ci = control_events,
+  n2i = control_total,
+  
+  data = d %>% 
+  filter(treatment == "sarilumab")
+) %>%
+  as_tibble() %>% 
+  select(study, yi, vi)
+```
+
+Meta-regression model
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood} \\
+\theta_i & \sim Normal(\mu, \tau^2)\\
+\mu &= \beta_0 + \beta_1 x\\
+\\
+\beta_0 & \sim \operatorname{Normal}(0, 1.5^2) \tag{Priors} \\
+\beta_1  & \sim \operatorname{Normal}(0, 1^2) \\
+\tau & \sim \operatorname{Half-Normal}(0.5) \\
+\end{align*}
+$$
+
+
+```{r}
+# Extract mean and SE for toci from meta-regression model
+
+mean_toci = fixef(model_sarilumab_vs_tocilizumab)[1,1]
+se_toci = fixef(model_sarilumab_vs_tocilizumab)[1,2]
+
+# Your code (adapted)
+
+fit <- rma(yi, vi, data = sari_logOR)
+
+pred <- as.data.frame(
+  predict(fit)
+)
+
+
+sim_func <- function(){
+  
+  # Samples from toci's predictive distribution 
+  yrep = model_sarilumab_vs_tocilizumab %>% 
+    posterior_samples() %>% 
+    summarise(theta_toci = rnorm(100, b_Intercept, sd_study__Intercept)) %>% 
+    pull()
+  
+  se_diff <- NA
+  mean_diff = NA
+  
+  for(i in 1:100){
+    
+    datnew <- 
+      data.frame(yi = c(sari_logOR$yi, yrep[1:i] ), 
+                 vi = c(sari_logOR$vi, rep(avg_variance_toci, 
+                                           length(1:i))))
+    
+    fiti <- rma(yi, vi, data = datnew)
+    
+    mean_diff[i] = (fiti$beta - mean_toci)
+    se_diff[i]=  sqrt(fiti$se^2 + se_toci^2)
+  }
+  
+  dat <- data.frame(mean_diff = mean_diff,
+                    se_diff = se_diff, k = 1:100)
+  return(dat)
+}
+
+reps = 100
+res <- replicate(reps, sim_func(), simplify = FALSE)
+
+
+```
+
+```{r}
+# Mean difference plot
+
+do.call(rbind.data.frame, res) %>% 
+  as_tibble() %>% 
+  mutate(group = rep(1:rep, each = 100)) %>%
+  ggplot(aes(x = factor(k), y = mean_diff, group = group)) +
+  geom_line(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red") + 
+  scale_y_continuous(breaks = seq(0, 0.3, 0.05)) +
+  coord_cartesian(y = c(0,0.3))
+```
+
+
+```{r}
+# Probability of equivalence plot
+
+N = 10e4
+fun = function(mean_diff, se_diff){
+ prob =  pnorm(-log(0.85), mean = mean_diff, sd = se_diff) - pnorm(log(0.85), mean = mean_diff, sd = se_diff)
+ prob
+}
+
+do.call(rbind.data.frame, res) %>% 
+  as_tibble() %>% 
+  mutate(group = rep(1:reps, each = 100)) %>%
+  mutate(prob = fun(mean_diff, se_diff)) %>% 
+  
+  ggplot(aes(x = factor(k), y = prob, group = group)) +
+  geom_line(alpha = 0.5) +
+  scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+  coord_cartesian(y = c(0,1))
+```
+
