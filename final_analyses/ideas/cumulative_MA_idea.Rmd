@@ -1,0 +1,1414 @@
+---
+title: "Idea: Using simulation to prove there isn't enough evidence in favor of sarilumab"
+author: "Arthur M. Albuquerque"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+          toc: yes
+          toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r}
+pacman::p_load(brms,
+               tidyverse,
+               metafor,
+               tidybayes,
+               patchwork,
+               rio, # to import/export files
+               here) # reproducible file paths
+
+
+```
+
+```{r}
+# Import models and original data
+
+model_sarilumab_only = 
+  readRDS(here("final_analyses/output/fits/main/model_sarilumab_only.rds"))
+
+model_sarilumab_vs_tocilizumab =
+  readRDS(here("final_analyses/output/fits/main/model_sarilumab_vs_tocilizumab.rds"))
+
+d = import(here("final_analyses", "data", "mortality_data.xlsx")) %>% 
+  # Exclude studies with 0 events in both treatment arms
+  filter((control_events + trt_events) != 0)
+
+set.seed(123)
+```
+
+In this document, I will explain Dr. Williams' idea. I will display multiple plots
+but bear in mind most of them are shown here to help you understand the underlying
+details of this analysis. In the end, I will highlight what plots would be
+essential in a research article in my opinion.
+
+## Research question
+
+**Does sarilumab reduce mortality in hospitalized patients with COVID-19?**
+
+According to WHO's conclusion, sarilumab reduces mortality in hospitalized patients
+for COVID-19. However, it is clear that this conclusion was mainly driven by
+tocilizumab's effect. As shown below, sarilumab by itself showed inconclusive results. 
+Thus, we sought to further analyze these results. 
+
+To explore both the uncertainty and the need of future research on sarilumab, Dr. William suggested 
+that we should perform simulation with future studies. I will thoroughly explain
+the details below.
+
+### WHO's meta-analysis
+
+Although the main figures in WHO's article show fixed-effect meta-analyses (MA), they
+also performed random-effect (RE) analyses for sensitivity analyses. Below,
+I display their eFigure 3 (RE MA for mortality).
+
+Of note, they found an odds ratio of 1.08 (95% CI 0.83 - 1.40) for sarilumab.
+Because they also pooled both tocilizumab and sarilumab data, the overall effect was
+0.90 (95%CI 0.76 - 1.05).
+
+
+```{r, fig.align='center'}
+knitr::include_graphics(path = here("final_analyses/output/plots/who_ma_eFig3.png"))
+```
+
+<br>
+
+## Our reanalysis
+
+In our Bayesian reanalysis, we performed a random-effect meta-regression in which
+we used both sarilumab and tocilizumab data. In contrast
+to WHO's model above, we estimated sarilumab's and tocilizumab's effect separately,
+as shown below:
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood} \\
+\theta_i & \sim Normal(\mu, \tau^2)\\
+\mu &= \beta_0 + \beta_1 x\\
+\\
+\beta_0 & \sim \operatorname{Normal}(0, 1.5^2) \tag{Priors} \\
+\beta_1  & \sim \operatorname{Normal}(0, 1^2) \\
+\tau & \sim \operatorname{Half-Normal}(0.5) \\
+\end{align*}
+$$
+
+Here are the posterior distributions of tocilizumab's and sarilumab's overall effect:
+
+```{r}
+
+# Calculate sari effect sizes
+sari_logOR = 
+  escalc(
+  measure = "OR", # log odds ratio,
+  
+  # Sarilumab
+  ai = trt_events,
+  n1i = trt_total,
+  
+  # Control
+  ci = control_events,
+  n2i = control_total,
+  
+  data = d %>% 
+  filter(treatment == "sarilumab")
+) %>%
+  as_tibble() %>% 
+  # Calculate standard error
+  mutate(sei = sqrt(vi)) %>% 
+  select(study, yi, vi, sei)
+```
+
+
+```{r, fig.align = "center", fig.width=5, fig.height=3.5, fig.cap="Estimated posterior distributions for tocilizumab's (0.84 [95% Crl 0.71, 1.00]) and sarilumab's (1.06 [95% Crl 0.78, 1.37]) overall effect. For tocilizumab, there is 97% of probability of odds ratio being lower than 1, while 36% for sarilumab."}
+prob_benefit_sari = 
+  model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean((b_Intercept + b_treatment) < 0),2))
+
+prob_benefit_toci = 
+  model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean((b_Intercept) < 0),2))
+
+cis95 = model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(Sarilumab = exp(b_Intercept + b_treatment),
+         Tocilizumab = exp(b_Intercept),
+         ratioOR = exp(b_treatment)) %>% 
+  mean_qi()
+
+# Sari: 1.06 [0.78, 1.37]
+# Toci: 0.84 [0.71, 1.00]	
+
+# ratioOR: 1.27	[0.89, 1.69]
+
+model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(Sarilumab = exp(b_Intercept + b_treatment),
+         Tocilizumab = exp(b_Intercept)) %>% 
+  pivot_longer(Sarilumab:Tocilizumab) %>% 
+  mutate(name = factor(name, levels = c("Tocilizumab", "Sarilumab"))) %>% 
+  
+  ggplot(aes(value, fill_ramp = stat(x < 1), fill = name)) +
+  stat_halfeye(
+    .width = .95,
+    point_interval = mean_qi) +
+  ggdist::scale_fill_ramp_discrete(from = "gray85", range = c(0,1)) +
+  scale_fill_manual(values = c("#DCA3C2", # Tocilizumab
+                               "#9CC4DB" # Sarilumab
+                    )) +
+  geom_vline(xintercept = 1, linetype = 2) +
+  scale_x_continuous(breaks = seq(0.6, 1.6, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.1)) +
+  coord_cartesian(x = c(0.5, 1.7)) +
+  labs(x ="Odds Ratio", y = NULL) +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "#E4E6E7"),
+    strip.text.x = element_text(size = 12),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.title.x = element_text(size = 14),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 10, 20),
+    panel.border = element_rect(colour = "#999999", fill=NA, size=1)
+  ) +
+    facet_wrap(~name, ncol = 1)
+```
+
+<br>
+
+As mentioned above, we did not pool tocilizumab and sarilumab data together. Instead,
+we separately estimated their effect. To be able to compare to WHO's pooled results (0.90 [95%CI 0.76 - 1.05]), we will now fit a (Bayesian) model similar to theirs:
+
+$$
+\begin{align*}
+y_i & \sim Normal(\theta_i, \sigma_i^2) \tag{Likelihood}\\
+\theta_i & \sim Normal(\mu_{toci+sari}, \tau^2)\\
+\\
+\mu_{toci+sari} & \sim \operatorname{Normal}(0, 1.5^2) \tag{Priors}\\
+\tau & \sim \operatorname{Half-Normal}(0.5) \\
+\end{align*}
+$$
+
+```{r}
+d = 
+  d %>% 
+  filter((control_events + trt_events) != 0)
+
+# Calculate log odds ratio
+
+d_logOR = 
+  metafor::escalc(
+  measure = "OR", # log odds ratio,
+  
+  # Tocilizumab/Sarilumab
+  ai = trt_events,
+  n1i = trt_total,
+  
+  # Control
+  ci = control_events,
+  n2i = control_total,
+  
+  data = d
+) %>%
+  as_tibble() %>% 
+  # Dummy approach, tocilizumab = 0, sarilumab = 1
+  mutate(treatment = ifelse(treatment == "tocilizumab", 0, 1)) %>% 
+  # Calculate standard error
+  mutate(sei = sqrt(vi)) 
+
+## Formula
+mf = 
+  # https://bookdown.org/content/3890/horoscopes-insights.html#use-the-0-intercept-syntax
+  formula(yi | se(sei) ~ 0 + Intercept + (1 | study))
+
+## Priors
+priors = 
+  prior(normal(0, 1.5), class = "b", coef = "Intercept") + 
+  prior(normal(0, 0.5), class = "sd") # Half-Normal(0.5)
+
+## Fit model (suppressed)
+
+# pooled_model = 
+#   brm(
+#   data = d_logOR, 
+#   family = gaussian,
+#   
+#   formula = mf,
+#   prior = priors,
+#   sample_prior = TRUE,
+#   
+#   
+#   backend = "cmdstanr", # faster
+#   cores = parallel::detectCores(),
+#   chains = 4,
+#   warmup = 2000,
+#   iter = 4000,
+#   control = list(adapt_delta = .95),
+#   seed = 123,
+#   file = here("final_analyses/output/fits/simulations/model_pooled")
+# )
+
+# Load model
+model_pooled = 
+  readRDS(here("final_analyses/output/fits/simulations/model_pooled.rds"))
+```
+
+In this case, we can estimate the posterior distribution of tocilizumab and sarilumab 
+pooled effect ($\mu_{toci+sari}$):
+
+```{r, fig.align = "center", fig.width=5, fig.height=2.5, fig.cap="Estimated posterior distribution for pooled overall effect (0.89 [95%Crl 0.76 - 1.06]). There is 93% of probability of odds ratio being lower than 1."}
+
+prob_benefit_toci = 
+  model_pooled %>% 
+  posterior_samples() %>% 
+  summarise(n = 100*round(mean((b_Intercept) < 0),2))
+
+cis95 = model_pooled %>% 
+  posterior_samples() %>% 
+  summarise(pooled = exp(b_Intercept)) %>% 
+  mean_qi() 
+
+# 0.89  [0.76 -	1.06]
+
+model_pooled %>% 
+  posterior_samples() %>% 
+  summarise("Pooled (Tocilizumab + Sarilumab)" = exp(b_Intercept)) %>% 
+  pivot_longer(1) %>% 
+  
+  ggplot(aes(value, fill_ramp = stat(x < 1), fill = name)) +
+  stat_halfeye(
+    .width = .95,
+    point_interval = mean_qi) +
+  ggdist::scale_fill_ramp_discrete(from = "gray85", range = c(0,1)) +
+  scale_fill_manual(values = c("#b3afd4")) +
+  geom_vline(xintercept = 1, linetype = 2) +
+  scale_x_continuous(breaks = seq(0.6, 1.6, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.1)) +
+  coord_cartesian(x = c(0.5, 1.7)) +
+  labs(x ="\nOdds Ratio", y = NULL) +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "#E4E6E7"),
+    strip.text.x = element_text(size = 12),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.title.x = element_text(size = 14),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 10, 20),
+    panel.border = element_rect(colour = "#999999", fill=NA, size=1)
+  ) +
+    facet_wrap(~name, ncol = 1)
+```
+
+<br>
+
+## Predicting future studies
+
+Because we performed random-effect meta-analyses, we can estimate the predictive
+distributions ($\theta$) for tocilizumab, sarilumab and pooled effect: 
+
+
+```{r}
+
+toci_predictive_distribution = 
+  model_sarilumab_vs_tocilizumab %>% 
+    posterior_samples() %>% 
+    summarise(yi = rnorm(10e4, b_Intercept, sd_study__Intercept))
+
+studies = 50
+
+toci_predictive_samples = 
+  model_sarilumab_vs_tocilizumab %>% 
+    posterior_samples() %>% 
+    summarise(yi = rnorm(studies, b_Intercept, sd_study__Intercept),
+              study = 1:studies,
+              name = str_c("Future Study ", study),
+              # Re-order for plot
+              name = fct_reorder(name, desc(study))) 
+
+plot_toci_predictive_distribution  =
+toci_predictive_distribution %>% 
+  ggplot(aes(exp(yi))) +
+  stat_halfeye(point_interval = mean_qi,
+               .width = 0.95, fill = "#DCA3C2") +
+  geom_vline(xintercept = 1, linetype = 2 ) +
+  scale_x_continuous(breaks = seq(0.4, 1.8, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.2)) +
+  labs(x = NULL, y = NULL, title ="Tocilizumab's Predictive Distribution") +
+  
+  coord_cartesian(x = c(0.4, 1.8)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 0, 20)
+  ) 
+
+
+plot_toci_predictive_samples =
+toci_predictive_samples %>% 
+  ggplot(aes(x = exp(yi), y = name)) +
+  geom_point() +
+  scale_x_continuous(breaks = seq(0.4, 1.8, 0.2)) +
+  geom_vline(xintercept = 1, linetype = 2 ) +
+  scale_y_discrete(breaks = c("Future Study 1",
+                              "Future Study 10",
+                              "Future Study 20",
+                              "Future Study 30",
+                              "Future Study 40",
+                              "Future Study 50")) +
+  labs(x = "Odds Ratio", y = NULL) +
+  
+  coord_cartesian(x = c(0.4, 1.8)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(0, 20, 20, 20)
+  ) 
+```
+
+
+```{r}
+
+sari_predictive_distribution = 
+  model_sarilumab_vs_tocilizumab %>% 
+    posterior_samples() %>% 
+    summarise(yi = rnorm(10e4, (b_Intercept + b_treatment), sd_study__Intercept))
+
+studies = 50
+
+sari_predictive_samples = 
+  model_sarilumab_vs_tocilizumab %>% 
+    posterior_samples() %>% 
+    summarise(yi = rnorm(studies, (b_Intercept + b_treatment), sd_study__Intercept),
+              study = 1:studies,
+              name = str_c("Future Study ", study),
+              # Re-order for plot
+              name = fct_reorder(name, desc(study))) 
+
+plot_sari_predictive_distribution  =
+sari_predictive_distribution %>% 
+  ggplot(aes(exp(yi))) +
+  stat_halfeye(point_interval = mean_qi,
+               .width = 0.95,
+               fill = "#9CC4DB") +
+  geom_vline(xintercept = 1, linetype = 2 ) +
+  scale_x_continuous(breaks = seq(0.4, 1.8, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.2)) +
+  labs(x = NULL, y = NULL, title ="Sarilumab's Predictive Distribution") +
+  
+  coord_cartesian(x = c(0.4, 1.8)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 0, 20)
+  ) 
+
+
+plot_sari_predictive_samples =
+sari_predictive_samples %>% 
+  ggplot(aes(x = exp(yi), y = name)) +
+  geom_point() +
+  scale_x_continuous(breaks = seq(0.4, 1.8, 0.2)) +
+  geom_vline(xintercept = 1, linetype = 2 ) +
+  scale_y_discrete(breaks = c("Future Study 1",
+                              "Future Study 10",
+                              "Future Study 20",
+                              "Future Study 30",
+                              "Future Study 40",
+                              "Future Study 50")) +
+  labs(x = "Odds Ratio", y = NULL) +
+  
+  coord_cartesian(x = c(0.4, 1.8)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(0, 20, 20, 20)
+  ) 
+```
+
+
+```{r}
+pooled_predictive_distribution = 
+  model_pooled %>% 
+    posterior_samples() %>% 
+    summarise(yi = rnorm(10e4, b_Intercept, sd_study__Intercept))
+
+studies = 50
+
+pooled_predictive_samples = 
+  model_pooled %>% 
+    posterior_samples() %>% 
+    summarise(yi = rnorm(studies, b_Intercept, sd_study__Intercept),
+              study = 1:studies,
+              name = str_c("Future Study ", study),
+              # Re-order for plot
+              name = fct_reorder(name, desc(study))) 
+
+
+plot_pooled_predictive_distribution  =
+pooled_predictive_distribution %>% 
+  ggplot(aes(exp(yi))) +
+  stat_halfeye(point_interval = mean_qi,
+               .width = 0.95,
+               fill = "#b3afd4") +
+  geom_vline(xintercept = 1, linetype = 2 ) +
+  scale_x_continuous(breaks = seq(0.4, 1.8, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.2)) +
+  labs(x = NULL, y = NULL, title ="Pooled's Predictive Distribution") +
+  
+  coord_cartesian(x = c(0.4, 1.8)) +
+  theme(legend.position = "none",
+        
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 0, 20)
+  ) 
+
+
+plot_pooled_predictive_samples =
+pooled_predictive_samples %>% 
+  ggplot(aes(x = exp(yi), y = name)) +
+  geom_point() +
+  scale_x_continuous(breaks = seq(0.4, 1.8, 0.2)) +
+  geom_vline(xintercept = 1, linetype = 2 ) +
+  scale_y_discrete(breaks = c("Future Study 1",
+                              "Future Study 10",
+                              "Future Study 20",
+                              "Future Study 30",
+                              "Future Study 40",
+                              "Future Study 50")) +
+  labs(x = "Odds Ratio", y = NULL) +
+  
+  coord_cartesian(x = c(0.4, 1.8)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(0, 20, 20, 20)
+  ) 
+```
+
+```{r, fig.align="center", fig.height=4.5}
+toci_predictive_distribution %>% 
+  rename("Tocilizumab's" = yi) %>% 
+  bind_cols(
+    sari_predictive_distribution %>% 
+  rename("Sarilumab's" = yi)
+  ) %>% 
+  bind_cols(
+    pooled_predictive_distribution %>% 
+  rename("Pooled's" = yi)
+  ) %>% 
+  
+  pivot_longer(1:3) %>% 
+  
+  ggplot(aes(x = exp(value), y = name, fill = name)) +
+  stat_halfeye(point_interval = mean_qi,
+               .width = 0.95) +
+  geom_vline(xintercept = 1, linetype = 2 ) +
+  scale_fill_manual(values = c( "#b3afd4", "#9CC4DB", "#DCA3C2"))+
+  scale_x_continuous(breaks = seq(0.4, 1.8, 0.2)) +
+  coord_cartesian(x = c(0.4, 1.8)) +
+  
+  labs(x = "Odds Ratio", y = NULL) + 
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(0, 20, 20, 20)
+  ) 
+```
+
+<br>
+
+Notably, the predictive distributions are wider than the distributions I showed before,
+because now we are taking in account the estimated between-study heterogeneity ($\tau^2$).
+An interesting feature of Bayesian random-effect meta-analyses is that we can
+simulate (predict) the point estimates of future studies based on the predictive distribution.
+
+Thus, now I will randomly draw 50 different future studies from each predictive
+distribution. In each plot, I display the respective predictive distribution on top
+(mean and 95% credible interval) and the simulated point estimates below:
+
+```{r, fig.align="center"}
+
+(plot_toci_predictive_distribution / plot_toci_predictive_samples)+ plot_layout(heights = c(0.2, 1))
+```
+
+```{r, fig.align="center"}
+
+(plot_sari_predictive_distribution / plot_sari_predictive_samples)+ plot_layout(heights = c(0.2, 1))
+```
+
+```{r, fig.align="center"}
+
+(plot_pooled_predictive_distribution / plot_pooled_predictive_samples)+ plot_layout(heights = c(0.2, 1))
+```
+
+
+I hope you can appreciate that tocilizumab's predictive distribution (PD) is
+narrower and its respective future studies are closer to each other. In contrast,
+sarilumab's PD is wider, and thus future studies are far apart. Pooled PD
+yielded mixed results in this simulation.
+
+
+## Cumulative meta-analyses with future studies
+
+As shown above, we can simulate point estimates of future studies with our 
+Bayesian models. Although these results already highlight the large uncertainty
+around sarilumab's effect (both current and future evidence), it is of great
+interest to better understand the need of future research on this drug. According
+to both WHO's analysis and our models, it becomes clear the current lack of 
+certainty around sarilumab's effect. However, WHO assumed tocilizumab and sarilumab are equivalent, and focused on pooled results to change their guidelines.
+
+To further analyze the impact of different assumptions on whether these drugs
+are equivalent or not, we will now combine current evidence on sarilumab (9
+studies) with simulated future studies from these different PDs: tocilizumab's,
+sarilumab's, and pooled's.
+
+To combine current with "future" evidence, we will perform random-effects
+meta-analyses. In contrast to the models above, we will fit cumulative meta-analyses,
+i.e., we will add one future study by one and estimate the "new" overall effect.
+
+```{r}
+# Calculate the average variance for toci studies (log odds ratio scale)
+
+# Formula from Appendix in doi: 10.1016/j.jclinepi.2008.07.006
+var_fun = function(a,b,c,d){
+  
+  var = 1/(a + 1/2) + 1/(b + 1/2) + 1/(c + 1/2) + 1/(d + 1/2)
+  
+  var
+}
+
+avg_variance_toci = 
+  d %>% 
+  filter(treatment == "tocilizumab") %>% 
+  mutate(a = mean(trt_events),
+         b = mean(control_events),
+         c = mean(trt_total - trt_events),
+         d = mean(control_total - control_events)) %>% 
+  summarise(var = var_fun(a,b,c,d)) %>% 
+  slice(1) %>% 
+  pull()
+
+# 0.04330471
+
+ci95 = round(exp(avg_variance_toci*1.96),2)
+```
+
+```{r}
+# Calculate the average variance for sari studies (log odds ratio scale)
+# for comparison
+
+avg_variance_sari = 
+  d %>% 
+  filter(treatment == "sarilumab") %>% 
+  mutate(a = mean(trt_events),
+         b = mean(control_events),
+         c = mean(trt_total - trt_events),
+         d = mean(control_total - control_events)) %>% 
+  summarise(var = var_fun(a,b,c,d)) %>% 
+  slice(1) %>% 
+  pull()
+
+# 0.1031403
+```
+
+To perform such analyses, we have to make a few assumptions. Predictive intervals only
+yield point estimates -- eg, mean effect -- of future studies. To fit a meta-analysis,
+we require both mean effect and the underlying variance for each study. Therefore,
+we will assume all future studies present with the same variance. Also, we will assume this variance 
+is equal to the the average variance in current tocilizumab studies, which is
+`r round(avg_variance_toci,2)` in the log odds ratio scale. 
+
+To better visualize these assumptions, I will now show the estimated 95%
+confidence intervals around 50 random future studies drawn from tocilizumab's
+predictive interval (same as shown before). These confidence intervals are
+directly related to the chosen fixed variance (`r round(avg_variance_toci,2)`)
+which yields a 95% confidence interval equal to $+-$ `r ci95` around the mean
+in the odds ratio scale.
+
+I used the log odds ratio scale in this plot to maintain the visual symmetry of
+confidence intervals:
+
+
+```{r}
+
+plot_toci_dist_log_odds =
+toci_predictive_distribution %>% 
+  ggplot(aes(yi)) +
+  stat_halfeye(point_interval = mean_qi,
+               .width = 0.95,
+               fill = "#DCA3C2") +
+  geom_vline(xintercept = 0, linetype = 2 ) +
+  scale_x_continuous(breaks = seq(-1, 1, 0.5)) +
+  scale_y_continuous(expand = c(0,0.2)) +
+  labs(x = NULL, y = NULL, title ="Tocilizumab's Predictive Distribution") +
+  
+  coord_cartesian(x = c(-1, 1)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 0, 20)
+  ) 
+
+plot_toci_samples_log_odds =
+toci_predictive_samples %>% 
+  mutate(ub = yi + 1.96*sqrt(avg_variance_toci),
+         lb = yi - 1.96*sqrt(avg_variance_toci)) %>% 
+  
+  ggplot(aes(x = yi, xmin = lb, xmax = ub, y = name)) +
+  geom_pointinterval() +
+  scale_x_continuous(breaks = seq(-1, 1, 0.5)) +
+  geom_vline(xintercept = 0, linetype = 2 ) +
+  scale_y_discrete(breaks = c("Future Study 1",
+                              "Future Study 10",
+                              "Future Study 20",
+                              "Future Study 30",
+                              "Future Study 40",
+                              "Future Study 50")) +
+  labs(x = "Log Odds Ratio", y = NULL) +
+  
+  coord_cartesian(x = c(-1, 1)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(0, 20, 20, 20)
+  ) 
+```
+
+```{r, fig.align="center"}
+
+(plot_toci_dist_log_odds / plot_toci_samples_log_odds)+ plot_layout(heights = c(0.2, 1))
+```
+
+The plot above only shows the mean and 95% confidence intervals of 50 randomly sampled
+future studies from tocilizumab's PD. Now, I will show the results
+of the cumulative meta-analysis based on these 50 studies. Moreover, I also show two other
+cumulative meta-analyses based on studies sampled from sarilumab's and pooled's PDs (already displayed before).
+
+```{r}
+
+### Drawing from Tocilizumab's predictive distribution
+
+# Run model with current sarilumab studies (frequentist for simplicity)
+fit <- rma(yi, vi, data = sari_logOR)
+
+pred <- as.data.frame(
+  predict(fit)
+)
+
+# Prepare function to run cumulative meta-analyses
+
+studies = 50
+
+
+sim_func <- function(){
+  
+  # Samples from toci's predictive distribution 
+  yrep = model_sarilumab_vs_tocilizumab %>% 
+    posterior_samples() %>% 
+    summarise(theta_toci = rnorm(studies, b_Intercept, sd_study__Intercept)) %>% 
+    pull()
+  
+  mean_fit = NA
+  
+  se_fit = NA
+  
+  for(i in 1:studies){
+    
+    datnew <- 
+      # Bind current sarilumab studies with samples from predictive dist above
+      data.frame(yi = c(sari_logOR$yi, yrep[1:i] ), 
+                 # Maintain original variance for current sari studies, but
+                 # use average variance of toci studies for 
+                 vi = c(sari_logOR$vi, rep(avg_variance_toci, 
+                                           length(1:i))))
+    
+    # Fit cumulative MA including i studies
+    fiti <- rma(yi, vi, data = datnew, control=list(stepadj=0.5))
+    
+    #  Store mean and standard error of overall results for this cumulative MA
+    mean_fit[i] = fiti$beta
+    se_fit[i]=  fiti$se
+    
+  }
+  
+  # Store all means and SE from all cumulative MAs
+  dat <- data.frame(mean_fits = mean_fit,
+                    se_fits = se_fit, k = 1:studies)
+  return(dat)
+}
+
+# Run cumulative MAs several times
+reps = 50
+res_toci <- replicate(reps, sim_func(), simplify = FALSE)
+
+
+```
+
+```{r}
+
+res_toci_data = 
+  # Unnest all models
+  do.call(rbind.data.frame, res_toci) %>% 
+  as_tibble() %>% 
+  # Calculate odds ratio and 95% CI
+  mutate(ub = mean_fits + 1.96*se_fits,
+         lb = mean_fits - 1.96*se_fits,
+         yiOR = exp(mean_fits),
+         lbOR = exp(lb),
+         ubOR = exp(ub), 
+         study = str_c("+ ", k, " Future Studies"))
+
+res_toci_data[1, 9] = "+ 1 Future Study"
+         
+
+p1 = res_toci_data %>% 
+  mutate(study = fct_reorder(study, desc(k))) %>% 
+  
+  ggplot(aes(x = study, y = yiOR, ymin = lbOR, ymax = ubOR)) +
+  
+  tidybayes::stat_lineribbon(.width = c(1)) +
+  scale_fill_manual(values = "#DCA3C2") +
+  geom_hline(yintercept = 1, linetype = 2) +
+  scale_x_discrete(breaks = c("+ 1 Future Study",
+                              "+ 10 Future Studies",
+                              "+ 20 Future Studies",
+                              "+ 30 Future Studies",
+                              "+ 40 Future Studies",
+                              "+ 50 Future Studies")) +
+  
+  labs(title = "Tocilizumab's Predictive Distribution",
+       y = "Odds Ratio", x = NULL) +
+  
+  scale_y_continuous(breaks = seq(0.8, 1.2, 0.1),
+                     limits = c(0.75, 1.2)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  coord_flip() 
+```
+
+```{r}
+res_toci_one_sample = 
+res_toci_data %>% 
+  slice(51:100)
+  
+res_toci_one_sample[1, 9] = "+ 1 Future Study"  
+
+p1_sample =
+res_toci_one_sample %>% 
+  mutate(study = fct_reorder(study, desc(k))) %>% 
+  
+  
+  ggplot(aes(y = study, x = yiOR, xmin = lbOR, xmax = ubOR)) +
+  
+  geom_pointinterval(color = "#C27CB0") +
+  geom_vline(xintercept = 1, linetype = 2) +
+  scale_y_discrete(breaks = c("+ 1 Future Study",
+                              "+ 10 Future Studies",
+                              "+ 20 Future Studies",
+                              "+ 30 Future Studies",
+                              "+ 40 Future Studies",
+                              "+ 50 Future Studies")) +
+  
+  labs(title = "Tocilizumab's Predictive Distribution",
+       x = "Odds Ratio", y = NULL) +
+  
+  scale_x_continuous(breaks = seq(0.6, 1.4, 0.1)) +
+  coord_cartesian(x = c(0.75, 1.4)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+```
+
+
+
+```{r}
+
+### Drawing from Tocilizumab's predictive distribution
+
+# Run model with current sarilumab studies (frequentist for simplicity)
+fit <- rma(yi, vi, data = sari_logOR)
+
+pred <- as.data.frame(
+  predict(fit)
+)
+
+# Prepare function to run cumulative meta-analyses
+
+studies = 50
+
+sim_func <- function(){
+  
+  # Samples from toci's predictive distribution 
+  yrep = model_sarilumab_vs_tocilizumab %>% 
+    posterior_samples() %>% 
+    summarise(theta_toci = rnorm(studies, b_Intercept + b_treatment, sd_study__Intercept)) %>% 
+    pull()
+  
+  mean_fit = NA
+  
+  se_fit = NA
+  
+  for(i in 1:studies){
+    
+    datnew <- 
+      # Bind current sarilumab studies with samples from predictive dist above
+      data.frame(yi = c(sari_logOR$yi, yrep[1:i] ), 
+                 # Maintain original variance for current sari studies, but
+                 # use average variance of toci studies for 
+                 vi = c(sari_logOR$vi, rep(avg_variance_toci, 
+                                           length(1:i))))
+    
+    # Fit cumulative MA including i studies
+    fiti <- rma(yi, vi, data = datnew, control=list(stepadj=0.5))
+    
+    #  Store mean and standard error of overall results for this cumulative MA
+    mean_fit[i] = fiti$beta
+    se_fit[i]=  fiti$se
+    
+  }
+  
+  # Store all means and SE from all cumulative MAs
+  dat <- data.frame(mean_fits = mean_fit,
+                    se_fits = se_fit, k = 1:studies)
+  return(dat)
+}
+
+# Run cumulative MAs several times
+reps = 50
+res_sari <- replicate(reps, sim_func(), simplify = FALSE)
+
+
+```
+
+```{r}
+
+res_sari_data = 
+  # Unnest all models
+  do.call(rbind.data.frame, res_sari) %>% 
+  as_tibble() %>% 
+  # Calculate odds ratio and 95% CI
+  mutate(ub = mean_fits + 1.96*se_fits,
+         lb = mean_fits - 1.96*se_fits,
+         yiOR = exp(mean_fits),
+         lbOR = exp(lb),
+         ubOR = exp(ub), 
+         study = str_c("+ ", k, " Studies"))
+         
+
+p2 = res_sari_data %>% 
+  mutate(study = fct_reorder(study, desc(k))) %>% 
+  
+  ggplot(aes(x = study, y = yiOR, ymin = lbOR, ymax = ubOR)) +
+  
+  tidybayes::stat_lineribbon(.width = c(1)) +
+  scale_fill_manual(values = "#9CC4DB") +
+  geom_hline(yintercept = 1, linetype = 2) +
+  
+  labs(title = "Sarilumab's Predictive Distribution",
+       y = "Odds Ratio", x = NULL) +
+  
+  scale_y_continuous(breaks = seq(0.8, 1.2, 0.1),
+                     limits = c(0.75, 1.2)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  coord_flip() 
+```
+
+```{r}
+res_sari_one_sample = 
+res_sari_data %>% 
+  slice(51:100)
+
+p2_sample  = 
+res_sari_one_sample %>% 
+  mutate(study = fct_reorder(study, desc(k))) %>% 
+  
+  
+  ggplot(aes(y = study, x = yiOR, xmin = lbOR, xmax = ubOR)) +
+  
+  geom_pointinterval(color = "#5891BF") +
+  geom_vline(xintercept = 1, linetype = 2) +
+  
+  labs(title = "Sarilumab's Predictive Distribution",
+       x = "Odds Ratio", y = NULL) +
+  
+  scale_x_continuous(breaks = seq(0.8, 1.4, 0.1),
+                     limits = c(0.75, 1.4)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+```
+
+```{r}
+
+### Drawing from Pooled's predictive distribution
+
+# Run model with current sarilumab studies (frequentist for simplicity)
+fit <- rma(yi, vi, data = sari_logOR)
+
+pred <- as.data.frame(
+  predict(fit)
+)
+
+# Prepare function to run cumulative meta-analyses
+
+studies = 50
+
+sim_func <- function(){
+  
+  # Samples from pooled's predictive distribution 
+  yrep = model_pooled %>% 
+    posterior_samples() %>% 
+    summarise(theta_toci = rnorm(studies, b_Intercept, sd_study__Intercept)) %>% 
+    pull()
+  
+  mean_fit = NA
+  
+  se_fit = NA
+  
+  for(i in 1:studies){
+    
+    datnew <- 
+      # Bind current sarilumab studies with samples from predictive dist above
+      data.frame(yi = c(sari_logOR$yi, yrep[1:i] ), 
+                 # Maintain original variance for current sari studies, but
+                 # use average variance of toci studies for 
+                 vi = c(sari_logOR$vi, rep(avg_variance_toci, 
+                                           length(1:i))))
+    
+    # Fit cumulative MA including i studies
+    fiti <- rma(yi, vi, data = datnew, control=list(stepadj=0.5))
+    
+    #  Store mean and standard error of overall results for this cumulative MA
+    mean_fit[i] = fiti$beta
+    se_fit[i]=  fiti$se
+    
+  }
+  
+  # Store all means and SE from all cumulative MAs
+  dat <- data.frame(mean_fits = mean_fit,
+                    se_fits = se_fit, k = 1:studies)
+  return(dat)
+}
+
+# Run cumulative MAs several times
+reps = 50
+res_pooled <- replicate(reps, sim_func(), simplify = FALSE)
+
+
+```
+
+```{r}
+
+res_pooled_data = 
+  # Unnest all models
+  do.call(rbind.data.frame, res_pooled) %>% 
+  as_tibble() %>% 
+  # Calculate odds ratio and 95% CI
+  mutate(ub = mean_fits + 1.96*se_fits,
+         lb = mean_fits - 1.96*se_fits,
+         yiOR = exp(mean_fits),
+         lbOR = exp(lb),
+         ubOR = exp(ub), 
+         study = str_c("+ ", k, " Studies"))
+         
+
+p3 = res_pooled_data %>% 
+  mutate(study = fct_reorder(study, desc(k))) %>% 
+  
+  ggplot(aes(x = study, y = yiOR, ymin = lbOR, ymax = ubOR)) +
+  
+  tidybayes::stat_lineribbon(.width = c(1)) +
+  scale_fill_manual(values = "#b3afd4") +
+  geom_hline(yintercept = 1, linetype = 2) +
+  
+  labs(title = "Pooled's Predictive Distribution",
+       y = "Odds Ratio", x = NULL) +
+  
+  scale_y_continuous(breaks = seq(0.8, 1.2, 0.1),
+                     limits = c(0.75, 1.2)) +
+  theme(
+    legend.position = "none",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  coord_flip() 
+```
+
+```{r}
+res_pooled_one_sample = 
+res_pooled_data %>% 
+  slice(51:100)
+  
+res_pooled_one_sample[1, 9] = "+ 1 Study"  
+
+p3_sample  = 
+  res_pooled_one_sample %>% 
+  mutate(study = fct_reorder(study, desc(k))) %>% 
+  
+  
+  ggplot(aes(y = study, x = yiOR, xmin = lbOR, xmax = ubOR)) +
+  
+  geom_pointinterval(color = "#945BB3") +
+  geom_vline(xintercept = 1, linetype = 2) +
+  
+  labs(title = "Pooled's Predictive Distribution",
+       x = "Odds Ratio", y = NULL) +
+  
+  scale_x_continuous(breaks = seq(0.8, 1.4, 0.1),
+                     limits = c(0.75, 1.4)) +
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.title.x = element_text(size = 15),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+```
+
+```{r, fig.align="center", fig.width=12, fig.height = 6.5, fig.cap= "The X axis represents the estimated overall odds ratio (mean + 95%CI) for each cumulative meta-analysis, i.e. the combined effect of current sarilumab evidence with Y future studies. The Y axis depict how many studies had been included thus far each cumulative meta-analysis, from 1 to 50."}
+p1_sample + p2_sample + p3_sample
+```
+
+According to the plots displayed above, it is clear that when multiple simulated
+future studies are combined to sarilumab's current evidence, the overall
+effect approximates to the mean of the underlying PD.
+
+Of note, we only sampled 50 studies and performed one cumulative
+meta-analysis for each PD. Of course, these samples are random, and there is
+uncertainty around them. Thus, to better estimate the simulated overall effect,
+we repeated these analyses 50 times in respect to each PD, i.e.,
+we performed 50 different cumulative meta-analyses (per PD) by including 50 additional
+studies in each of them. 
+
+I display below the resulting 95% CIs, while accounting for the difference between
+all cumulative meta-analyses.
+
+
+```{r warning=FALSE, fig.align="center", fig.width=12, fig.height = 6.5, fig.cap="Solid black lines depict the mean value, and areas depict the 95% credible intervals of all simulations combined."}
+p1 + p2 + p3
+```
+
+
+Lastly, to further understand these results, we can quantify the posterior probability of any benefit (OR < 1) for each step in these cumulative meta-analyses"
+
+```{r}
+
+# Function to calculate probability of any benefit (log OR < 0, i.e. log[1])
+fun = function(mean_fits, se_fits){
+ prob =  pnorm(log(1), mean = mean_fits, sd = se_fits)
+ prob
+}
+
+# Unnest all models
+toci_any = 
+  do.call(rbind.data.frame, res_toci) %>% 
+  as_tibble() %>% 
+  # Calculate probability of any benefit (OR < 1)
+  mutate(prob = fun(mean_fits, se_fits),
+       
+       study = str_c("+ ", k))
+
+p1 =
+  toci_any %>% 
+    mutate(study = fct_reorder(study, k)) %>% 
+  
+  ggplot(aes(x = study, y = 100*prob)) +
+  
+  tidybayes::stat_lineribbon(.width = 1) +
+  scale_fill_manual(values = "#DCA3C2") +
+  scale_x_discrete(breaks = c("+ 1",
+                              "+ 10",
+                              "+ 20",
+                              "+ 30",
+                              "+ 40",
+                              "+ 50")) +
+  
+  labs(title = "Tocilizumab's Predictive Distribution",
+       y = "Probability (%)", x = NULL) +
+  
+  scale_y_continuous(breaks = seq(0, 100, 20),
+                     limits = c(0,100)) +
+    
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 12),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    panel.grid.major.y = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  ) 
+```
+
+```{r}
+
+# Unnest all models
+sari_any = 
+  do.call(rbind.data.frame, res_sari) %>% 
+  as_tibble() %>% 
+  # Calculate probability of any benefit (OR < 1)
+  mutate(prob = fun(mean_fits, se_fits),
+       study = str_c("+ ", k))
+
+p2 =
+  sari_any %>% 
+    mutate(study = fct_reorder(study, k)) %>% 
+  
+  ggplot(aes(x = study, y = 100*prob)) +
+  
+  tidybayes::stat_lineribbon(.width = 1) +
+  scale_fill_manual(values = "#9CC4DB") +
+  scale_x_discrete(breaks = c("+ 1",
+                              "+ 10",
+                              "+ 20",
+                              "+ 30",
+                              "+ 40",
+                              "+ 50")) +
+  
+  labs(title = "Sarilumab's Predictive Distribution",
+       y = "Probability (%)", x = NULL) +
+  
+  scale_y_continuous(breaks = seq(0, 100, 20),
+                     limits = c(0,100)) +
+    
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 12),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    panel.grid.major.y = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  ) 
+```
+
+```{r}
+
+# Unnest all models
+pooled_any = 
+  do.call(rbind.data.frame, res_pooled) %>% 
+  as_tibble() %>% 
+  # Calculate probability of any benefit (OR < 1)
+  mutate(prob = fun(mean_fits, se_fits),
+       study = str_c("+ ", k))
+
+p3 =
+  pooled_any %>% 
+    mutate(study = fct_reorder(study, k)) %>% 
+  
+  ggplot(aes(x = study, y = 100*prob)) +
+  
+  tidybayes::stat_lineribbon(.width = 1) +
+  scale_fill_manual(values = "#b3afd4") +
+  scale_x_discrete(breaks = c("+ 1",
+                              "+ 10",
+                              "+ 20",
+                              "+ 30",
+                              "+ 40",
+                              "+ 50")) +
+  
+  labs(title = "Pooled's Predictive Distribution",
+       y = "Probability (%)", x = "Future Studies") +
+  
+  scale_y_continuous(breaks = seq(0, 100, 20),
+                     limits = c(0,100)) +
+    
+  theme(legend.position = "none",
+        plot.title.position = "plot",
+    axis.ticks.y = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 12),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    panel.grid.major.y = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 20, 20)
+  ) 
+```
+
+```{r, fig.align="center", fig.height=8, fig.width=6, fig.cap="Black solid lines decict the mean, and areas depict the 95% credible intervals of all simulations combined. The X axis depict how many studies had been included thus far each cumulative meta-analysis, from 1 to 50. The Y axis depic the probability of any benefit, i.e. of odds ratio lower than 1."}
+p1 / p2 / p3
+```
+
+**In conclusion, current evidence on sarilumab shows a 36% probability for any benefit in reducing mortality. If we assume sarilumab is equivalent to tocilizumab, we would require 10 future studies to reach \>95% of probability for any benefit. On the other hand, if we assume sarilumab is not equivalent to tocilizumab, there would be \<50% of probability that sarilumab reduces mortality, regardless of the number of studies included in a meta-analysis.**
+
+## Main Figures
+
+### Figure 1
+
+```{r, fig.align = "center", fig.width=5, fig.height=5, fig.cap="Estimated posterior distributions for tocilizumab's, sarilumab's, and pooled's overall effect."}
+
+pooled_results = 
+  model_pooled %>% 
+  posterior_samples() %>% 
+  summarise("Pooled (Tocilizumab + Sarilumab)" = exp(b_Intercept))
+
+ 
+  model_sarilumab_vs_tocilizumab %>% 
+  posterior_samples() %>% 
+  summarise(Sarilumab = exp(b_Intercept + b_treatment),
+         Tocilizumab = exp(b_Intercept)) %>% 
+  bind_cols(pooled_results) %>% 
+  pivot_longer(1:3) %>% 
+  mutate(name = factor(name,
+                       levels = c("Tocilizumab",
+                                  "Sarilumab",
+                                  "Pooled (Tocilizumab + Sarilumab)"))) %>% 
+  
+  ggplot(aes(value, fill_ramp = stat(x < 1), fill = name)) +
+  stat_halfeye(
+    .width = .95,
+    point_interval = mean_qi) +
+  ggdist::scale_fill_ramp_discrete(from = "gray85", range = c(0,1)) +
+  scale_fill_manual(values = c("#DCA3C2", # Tocilizumab
+                               "#9CC4DB", # Sarilumab
+                               "#b3afd4"
+                    )) +
+  geom_vline(xintercept = 1, linetype = 2) +
+  scale_x_continuous(breaks = seq(0.6, 1.6, 0.2)) +
+  scale_y_continuous(expand = c(0, 0.1)) +
+  coord_cartesian(x = c(0.5, 1.7)) +
+  labs(x ="Odds Ratio", y = NULL) +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "#E4E6E7"),
+    strip.text.x = element_text(size = 12),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_text(size = 13),
+    axis.title.x = element_text(size = 14),
+    axis.text.y = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major.x = element_line(color = "gray80", size = 0.3),
+    plot.margin = margin(20, 20, 10, 20),
+    panel.border = element_rect(colour = "#999999", fill=NA, size=1)
+  ) + 
+    facet_wrap(~name, nrow = 3)
+```
+
+### Figure 2
+
+```{r, fig.align="center", fig.height=8, fig.width=6, fig.cap="Simulated posterior probabilities of any benefit (odds ratio < 1) in cumulative meta-analyses including sarilumab's current evidence with future studies."}
+p1 / p2 / p3
+```
