@@ -1,6 +1,6 @@
 ---
 title: "Idea: Using simulation to prove there isn't enough evidence in favor of sarilumab"
-author: "Arthur M. Albuquerque"
+author: "Arthur M. Albuquerque and Donald R. Williams"
 date: '`r format(Sys.Date(), "%B %d, %Y")`'
 output: 
   html_document:
@@ -40,9 +40,9 @@ d = import(here("final_analyses", "data", "mortality_data.xlsx")) %>%
 set.seed(123)
 ```
 
-In this document, I will explain Dr. Williams' idea. I will display multiple plots
+In this document, we will elaborate on our new idea. We will display multiple plots
 but bear in mind most of them are shown here to help you understand the underlying
-details of this analysis. In the end, I will highlight what plots would be
+details of this analysis. In the end, we will highlight what plots would be
 essential in a research article in my opinion.
 
 ## Research question
@@ -51,18 +51,18 @@ essential in a research article in my opinion.
 
 According to WHO's conclusion, sarilumab reduces mortality in hospitalized patients
 for COVID-19. However, it is clear that this conclusion was mainly driven by
-tocilizumab's effect. As shown below, sarilumab by itself showed inconclusive results. 
+tocilizumab's effect. As shown below, sarilumab by itself showed inconclusive results.
 Thus, we sought to further analyze these results. 
 
-To explore both the uncertainty and the need of future research on sarilumab, Dr. William suggested 
-that we should perform simulation with future studies. I will thoroughly explain
+To explore both the uncertainty and the need of future research on sarilumab, we
+suggest that we should perform simulation with future studies. We will thoroughly explain
 the details below.
 
 ### WHO's meta-analysis
 
 Although the main figures in WHO's article show fixed-effect meta-analyses (MA), they
 also performed random-effect (RE) analyses for sensitivity analyses. Below,
-I display their eFigure 3 (RE MA for mortality).
+we display their eFigure 3 (RE MA for mortality).
 
 Of note, they found an odds ratio of 1.08 (95% CI 0.83 - 1.40) for sarilumab.
 Because they also pooled both tocilizumab and sarilumab data, the overall effect was
@@ -141,8 +141,6 @@ cis95 = model_sarilumab_vs_tocilizumab %>%
 
 # Sari: 1.06 [0.78, 1.37]
 # Toci: 0.84 [0.71, 1.00]	
-
-# ratioOR: 1.27	[0.89, 1.69]
 
 model_sarilumab_vs_tocilizumab %>% 
   posterior_samples() %>% 
@@ -314,8 +312,21 @@ model_pooled %>%
 
 ## Predicting future studies
 
+WHO's meta-analysis and our results above focused on the overall effect for each
+drug. In addition to these results, one could estimate the prediction intervals (WHO did not).
+
+A random-effect meta-analysis assumes there are two sources of variation: $\sigma^2$ 
+(within-study heterogeneity) and $\tau^2$ (between-study heterogeneity). While $\sigma^2$ represents the know variance in each study (extracted from the original study), $\tau^2$ represents the difference between the studies included in the meta-analysis.
+To estimate the prediction interval, one have to take in account the between-study
+heterogeneity. 
+
+Prediction intervals present with many advantages, such as helping to better 
+understand the heterogeneity between studies and how it influences results. 
+Moreover, one of the greatest features of prediction intervals is that they also inform 
+probable values for the true treatment effect in future settings. 
+
 Because we performed random-effect meta-analyses, we can estimate the predictive
-distributions ($\theta$) for tocilizumab, sarilumab and pooled effect: 
+distributions for tocilizumab, sarilumab and pooled effect: 
 
 
 ```{r}
@@ -571,14 +582,18 @@ toci_predictive_distribution %>%
 
 <br>
 
-Notably, the predictive distributions are wider than the distributions I showed before,
+Notably, the predictive distributions are wider than the distributions we showed before,
 because now we are taking in account the estimated between-study heterogeneity ($\tau^2$).
-An interesting feature of Bayesian random-effect meta-analyses is that we can
-simulate (predict) the point estimates of future studies based on the predictive distribution.
+All three distributions present with some probability of harm (odds ratio > 1),
+especially sarilumab's distribution.
 
-Thus, now I will randomly draw 50 different future studies from each predictive
-distribution. In each plot, I display the respective predictive distribution on top
-(mean and 95% credible interval) and the simulated point estimates below:
+In addition to features mentioned above, Bayesian random-effect meta-analyses present with a specific interesting feature in regard to the predictive distribution: 
+
+* We can simulate (predict) the point estimates of future studies.
+
+Below, I show 50 different future studies that were randomly drawn from each predictive
+distribution. In each plot, we display the respective predictive distribution on top
+(mean and 95% credible interval) and simulated point estimates below:
 
 ```{r, fig.align="center"}
 
@@ -596,27 +611,36 @@ distribution. In each plot, I display the respective predictive distribution on 
 ```
 
 
-I hope you can appreciate that tocilizumab's predictive distribution (PD) is
+
+We hope you can appreciate that tocilizumab's predictive distribution (PD) is
 narrower and its respective future studies are closer to each other. In contrast,
 sarilumab's PD is wider, and thus future studies are far apart. Pooled PD
 yielded mixed results in this simulation.
 
+The same phenomenon is displayed in one of Dr Williams' [article](https://psyarxiv.com/9vkqy):
+
+```{r, fig.align='center'}
+knitr::include_graphics(path = here("final_analyses/output/plots/williams_variation.png"))
+```
 
 ## Cumulative meta-analyses with future studies
 
 As shown above, we can simulate point estimates of future studies with our 
-Bayesian models. Although these results already highlight the large uncertainty
-around sarilumab's effect (both current and future evidence), it is of great
-interest to better understand the need of future research on this drug. According
-to both WHO's analysis and our models, it becomes clear the current lack of 
-certainty around sarilumab's effect. However, WHO assumed tocilizumab and sarilumab are equivalent, and focused on pooled results to change their guidelines.
+Bayesian models. Although these results already highlight the considerable uncertainty
+around sarilumab's effect (both current and forthcoming evidence), it is of great
+interest to better understand the need for future research on sarilumab.
+
+According to both WHO's analysis and our models, it becomes clear the current lack of 
+certainty around sarilumab's effect.  **Notably, there is no evidence-based "proof" that these drugs are equivalent for COVID-19. The only justifiable rationale is biological plausibility because they are both IL-6 antagonists, even though mechanisms of action and pharmacokinetics are not the same. In fact, current evidence only shows that these drugs probably do not have the same effect.** However, WHO assumed tocilizumab and sarilumab are equivalent and focused on pooled results to change their guidelines.
 
 To further analyze the impact of different assumptions on whether these drugs
-are equivalent or not, we will now combine current evidence on sarilumab (9
-studies) with simulated future studies from these different PDs: tocilizumab's,
-sarilumab's, and pooled's.
+are equivalent or not, we will leverage from the predictive distributions.
+In summary, we will generate future studies and combine with current evidence
+on sarilumab (9 studies). We can then quantify the impact of these
+assumptions over the long run and pinpoint when sarilumb will show a robust evidence
+of benefit (or not).
 
-To combine current with "future" evidence, we will perform random-effects
+Because we wnat to combine current with "future" evidence, we will perform random-effects
 meta-analyses. In contrast to the models above, we will fit cumulative meta-analyses,
 i.e., we will add one future study by one and estimate the "new" overall effect.
 
@@ -672,14 +696,14 @@ we will assume all future studies present with the same variance. Also, we will 
 is equal to the the average variance in current tocilizumab studies, which is
 `r round(avg_variance_toci,2)` in the log odds ratio scale. 
 
-To better visualize these assumptions, I will now show the estimated 95%
+To better visualize these assumptions, we will now show the estimated 95%
 confidence intervals around 50 random future studies drawn from tocilizumab's
 predictive interval (same as shown before). These confidence intervals are
 directly related to the chosen fixed variance (`r round(avg_variance_toci,2)`)
 which yields a 95% confidence interval equal to $+-$ `r ci95` around the mean
 in the odds ratio scale.
 
-I used the log odds ratio scale in this plot to maintain the visual symmetry of
+We used the log odds ratio scale in this plot to maintain the visual symmetry of
 confidence intervals:
 
 
@@ -746,8 +770,8 @@ toci_predictive_samples %>%
 ```
 
 The plot above only shows the mean and 95% confidence intervals of 50 randomly sampled
-future studies from tocilizumab's PD. Now, I will show the results
-of the cumulative meta-analysis based on these 50 studies. Moreover, I also show two other
+future studies from tocilizumab's PD. Now, we will show the results
+of the cumulative meta-analysis based on these 50 studies. Moreover, we also show two other
 cumulative meta-analyses based on studies sampled from sarilumab's and pooled's PDs (already displayed before).
 
 ```{r}
@@ -1191,7 +1215,7 @@ we repeated these analyses 50 times in respect to each PD, i.e.,
 we performed 50 different cumulative meta-analyses (per PD) by including 50 additional
 studies in each of them. 
 
-I display below the resulting 95% CIs, while accounting for the difference between
+We display below the resulting 95% CIs, while accounting for the difference between
 all cumulative meta-analyses.
 
 
@@ -1352,6 +1376,8 @@ p1 / p2 / p3
 ```
 
 **In conclusion, current evidence on sarilumab shows a 36% probability for any benefit in reducing mortality. If we assume sarilumab is equivalent to tocilizumab, we would require 10 future studies to reach \>95% of probability for any benefit. On the other hand, if we assume sarilumab is not equivalent to tocilizumab, there would be \<50% of probability that sarilumab reduces mortality, regardless of the number of studies included in a meta-analysis.**
+
+**Therefore, based on current evidence, the probability of harm is greater than of benefit in regards to sarilumab. Moreover, in case we assume sarilumab is equivalent to tocilizumab, we would require several future studies to find evidence of any benefit for sarilumab.**
 
 ## Main Figures
 
